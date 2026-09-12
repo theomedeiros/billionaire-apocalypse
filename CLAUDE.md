@@ -25,10 +25,18 @@ The whole app lives in `dist/` and is served as static files by `server.mjs` (a 
 
 Two-layer split, and it's strict:
 
-- **`dist/game.js` — the engine.** Pure game logic and all data (archetypes, regions, operations, opponents, businesses, dilemmas, regional events). State `s` is a plain object; every function takes `s` and returns/mutates it. No DOM, no `localStorage`, no I/O here. This is what the tests import directly. Key entry points: `newGame`/`restoreGame` (state lifecycle), `execute`/`endTurn` (turn loop), `outcome`/`regionalEnding` (win/loss + endings), `respond`/`resolveDilemma`/`recover` (pending-decision resolution), `blocked`/`*Blocked` (return a pt-BR reason string, or `''` when allowed).
+- **`dist/game.js` — the engine.** Pure game logic and all data (archetypes, regions, operations, jokers, opponents, businesses, dilemmas, regional events). State `s` is a plain object; every function takes `s` and returns/mutates it. No DOM, no `localStorage`, no I/O here. This is what the tests import directly. Key entry points: `newGame`/`restoreGame` (state lifecycle), `chooseOption` (the card-draft entry point — see below), `execute`/`endTurn` (underlying turn primitives), `outcome`/`regionalEnding` (win/loss + endings), `respond`/`resolveDilemma`/`recover` (pending-decision resolution), `blocked`/`*Blocked` (return a pt-BR reason string, or `''` when allowed).
 - **`dist/app.js` — the UI.** Imports everything from `game.js`, renders the entire screen by string-templating `innerHTML` on each `render()`, and wires events via delegation. Owns all side effects: `localStorage` (`save`/`read`), audio, modals (`openModal` on the `<dialog id="modal">`). Functions here return HTML strings (`map()`, `metric()`, `command()`, etc.).
 
 Supporting modules imported by `app.js`: `dist/tutorial.js` (skippable intro, gates on its own localStorage key) and `dist/operation-stories.js` (flavor text data).
+
+### Turn flow — the card draft
+
+A quarter is three months, and each month the player is dealt **3 drafted options** (`s.options`) and must pick exactly one — there is no free action picking. This layer is **additive on top of `execute`/`endTurn`**, so those primitives (and their tests) are unchanged.
+
+- `rollOptions(s)` refills `s.options` by sampling `draftPool(s)` (available operations + unowned jokers + asset/ally/rush decisions, padded with `pass`) via seeded `random(s)`. It's called on `newGame`, `restoreGame` (if mid-run with empty options), after each pick, after `endTurn`, and after `resolveDilemma`.
+- `chooseOption(s, idx)` is the single entry point the UI calls. It routes to `execute`/`acquireJoker`/`useAsset`/`supportAlly`/`rushProject`/`passMonth`, then auto-advances: rerolls, or calls `endTurn` when the 3rd action closes the quarter, or clears `options` if the run ended. `optionInfo(s, choice)` / `optionBlocked(s, idx)` describe a card for rendering.
+- **Jokers** are permanent passive multipliers bought as cards (`jokerDefs`, cap `maxJokers`). `jokerMultiplier(s, key, category)` stacks all owned jokers' `mods` for a given effect key + operation category; `effectiveCost(s, o)` and `execute` apply these so joker combos compound over a run. New state fields backing all this: `s.jokers` and `s.options`.
 
 ### Conventions that matter
 
