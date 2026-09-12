@@ -48,16 +48,19 @@ const limit=(v,min=0,max=100)=>Math.max(min,Math.min(max,v));
 export function newGame(archetype='visionario',territory=0){
  territory=Number.isInteger(territory)&&regions[territory]?territory:0;
  const a=archetypes.find(a=>a.id===archetype)||archetypes[0];
- return {version:6,decisions:[],dilemma:null,dilemmasSeen:[],recoveryUsed:false,territory,archetype:a.id,difficulty:'normal',turn:1,actions:0,turnUsed:[],money:12,income:1.5,chaos:0,politics:a.politics||0,media:0,tech:a.tech||0,exposure:0,
+ const s={version:6,decisions:[],dilemma:null,dilemmasSeen:[],recoveryUsed:false,territory,archetype:a.id,difficulty:'normal',turn:1,actions:0,turnUsed:[],money:12,income:1.5,chaos:0,politics:a.politics||0,media:0,tech:a.tech||0,exposure:0,
   regions:regions.map((r,i)=>({...r,stability:90,digital:0,sanitary:0,control:a.id==='oligarca'&&i===territory?20:0,influence:a.id==='oligarca'&&i===territory?20:0,heat:0,completed:[],unlocked:[],asset:null,crisisUntil:0,ally:a.id==='oligarca'&&i===territory?{loyalty:70,demandDue:4}:null})),
-  selected:territory,history:[],status:'playing',used:[],pending:[],sequence:0,seed:Math.floor(Math.random()*1e9),rewarded:false,report:null,
+  selected:territory,history:[],status:'playing',used:[],pending:[],sequence:0,seed:Math.floor(Math.random()*1e9),rewarded:false,report:null,jokers:[],options:[],
   world:{alert:0,investigation:0,adaptation:{economia:0,politica:0,midia:0,tech:0,saude:0}},rivals:{journalist:{lastMove:'Ainda não identificou um vínculo relevante.'},coalition:{lastMove:'Acompanha a estabilidade da sua região.'}},stats:{operations:0,assetChoices:0,threatsFaced:0,threatsResolved:0,projectsRushed:0}};
+ rollOptions(s);return s;
 }
 export function restoreGame(saved){
  if(!saved||saved.version!==6||saved.regions?.length!==3||!Number.isInteger(saved.territory)||!regions[saved.territory]||!archetypes.some(a=>a.id===saved.archetype))return null;
  saved.decisions??=[];
  saved.dilemma??=null;saved.dilemmasSeen??=[];saved.recoveryUsed??=false;
+ saved.jokers??=[];saved.options??=[];
  saved.selected=saved.territory;
+ if(saved.status==='playing'&&!saved.options.length)rollOptions(saved);
  return saved;
 }
 export function random(s){s.seed=(Math.imul(1664525,s.seed)+1013904223)>>>0;return s.seed/4294967296;}
@@ -125,7 +128,7 @@ export function blocked(s,o){
  if(s.selected!==s.territory)return 'Esta região está fora da campanha';
  if(o.secret){if(o.territory!==s.selected||!s.regions[s.selected].unlocked.includes(o.id))return 'Acordo não descoberto nesta região';reason=secretRequirements(s,o).find(x=>!x.met)?.text;if(reason)return reason;}
  if(s.turnUsed.includes(o.id))return 'Já executada neste trimestre';
- if(s.money<o.cost)return 'Patrimônio insuficiente';
+ if(s.money<effectiveCost(s,o))return 'Patrimônio insuficiente';
  if(o.id==='acquisition'&&(s.regions[s.selected].asset||s.pending.some(p=>p.operation==='acquisition'&&p.region===s.selected)))return 'Negócio já adquirido ou em aquisição';
  if(o.id==='research'&&s.pending.some(p=>p.kind==='project'))return 'Um projeto já está em desenvolvimento';
  for(const[k,v]of Object.entries(o.requires))if((['digital','sanitary'].includes(k)?s.regions[s.territory][k]:s[k])<v)return `Requer ${v}% de ${labels[k]}`;
@@ -150,8 +153,10 @@ function scheduleThreat(s,opponent,region,source,strength=1){
 function heat(s,region,amount){s.regions[region].heat=limit(s.regions[region].heat+amount);s.world.alert=limit(s.world.alert+amount*.45);}
 export function execute(s,id){
  const o=operations.find(o=>o.id===id);if(!o||blocked(s,o))return false;
- s.money-=o.cost;s.actions++;s.turnUsed.push(id);s.stats.operations++;
- const effect=previewEffect(s,o),immediate={},delayed={};
+ s.money-=effectiveCost(s,o);s.actions++;s.turnUsed.push(id);s.stats.operations++;
+ const effect=previewEffect(s,o);
+ for(const k of Object.keys(effect)){const m=jokerMultiplier(s,k,o.category);if(m!==1)effect[k]=+(effect[k]*m).toFixed(2);}
+ const immediate={},delayed={};
  for(const[k,v]of Object.entries(effect))(['exposure','investigation'].includes(k)||(id==='ipo'&&k==='money')?immediate:delayed)[k]=v;
  apply(s,immediate,s.selected);
  const kind=id==='research'&&s.archetype==='visionario'?'project':'impact';
@@ -161,6 +166,92 @@ export function execute(s,id){
  if(!Object.keys(delayed).length)recordDecision(s,o.name,describe(immediate),immediate);
  log(s,o.name,`${s.regions[s.selected].name}. ${describe(immediate)}${Object.keys(delayed).length?` Resultado previsto no T${s.turn+operationDelay(s,o)}: ${describe(delayed)}.`:''}`,'positive');
  revealSecrets(s);outcome(s);return true;
+}
+export const jokerDefs=[
+ {id:'contatos',name:'Rede de Contatos',icon:'☎',desc:'Operações econômicas custam 20% menos pelo resto da run.',mods:[{key:'cost',category:'economia',mult:.8}]},
+ {id:'sussurro',name:'Sussurro Editorial',icon:'✎',desc:'Toda operação gera 30% menos exposição.',mods:[{key:'exposure',mult:.7}]},
+ {id:'blindagem',name:'Blindagem Jurídica',icon:'⚖',desc:'Toda operação gera 30% menos investigação.',mods:[{key:'investigation',mult:.7}]},
+ {id:'ruptura',name:'Instinto de Ruptura',icon:'☍',desc:'Operações geram 25% mais caos.',mods:[{key:'chaos',mult:1.25}]},
+ {id:'paralelo',name:'Fundo Paralelo',icon:'⛃',desc:'+$0,3B de receita imediata e permanente ao adquirir esta carta.',onPick:{income:.3}},
+ {id:'lealdade',name:'Rede de Lealdade',icon:'♜',desc:'Operações políticas geram 30% mais influência.',mods:[{key:'politics',mult:1.3}]},
+ {id:'nucleo',name:'Núcleo Blindado',icon:'◇',desc:'Operações tecnológicas geram 25% menos fragilidade digital.',mods:[{key:'digital',category:'tech',mult:.75}]},
+ {id:'sombra',name:'Capital de Sombra',icon:'◈',desc:'Todas as operações custam 15% menos.',mods:[{key:'cost',mult:.85}]},
+ {id:'eco',name:'Câmara de Eco',icon:'◉',desc:'Operações de mídia geram 40% mais caos, mas 15% menos exposição.',mods:[{key:'chaos',category:'midia',mult:1.4},{key:'exposure',category:'midia',mult:.85}]},
+ {id:'aceleracao',name:'Aceleração',icon:'⚡',desc:'Operações tecnológicas geram 30% mais tecnologia.',mods:[{key:'tech',category:'tech',mult:1.3}]}
+];
+export const maxJokers=6;
+export function ownedJoker(s,id){return s.jokers.some(j=>j.id===id);}
+export function jokerMultiplier(s,key,category){return s.jokers.reduce((m,j)=>{const def=jokerDefs.find(d=>d.id===j.id);const mod=(def?.mods||[]).find(x=>x.key===key&&(!x.category||x.category===category));return mod?m*mod.mult:m;},1);}
+export function effectiveCost(s,o){return +(o.cost*jokerMultiplier(s,'cost',o.category)).toFixed(2);}
+export function acquireJoker(s,id){
+ const j=jokerDefs.find(j=>j.id===id);if(!j||s.status!=='playing'||ownedJoker(s,j.id)||s.jokers.length>=maxJokers)return false;
+ s.jokers.push({id:j.id,turn:s.turn});s.actions++;s.turnUsed.push('joker:'+j.id);
+ if(j.onPick)apply(s,j.onPick,s.selected);
+ recordDecision(s,j.name,j.desc,j.onPick||{});
+ log(s,'Carta adquirida: '+j.name,j.desc,'positive');outcome(s);return true;
+}
+export function passMonth(s){
+ if(s.status!=='playing'||s.actions>=3)return false;
+ s.actions++;
+ log(s,'Mês sem operação','Nenhuma opção foi vantajosa este mês. O grupo manteve a posição.','neutral');
+ outcome(s);return true;
+}
+function draftPool(s){
+ const pool=[];
+ for(const o of visibleOperations(s))if(!blocked(s,o))pool.push({kind:'operation',id:o.id});
+ for(const j of jokerDefs)if(!ownedJoker(s,j.id)&&s.jokers.length<maxJokers)pool.push({kind:'joker',id:j.id});
+ const r=s.regions[s.territory];
+ if(r.asset)for(const o of assetOptions[r.asset.type])if(!assetBlocked(s,s.territory,o.id))pool.push({kind:'asset',id:o.id});
+ if(!allyBlocked(s,s.territory))pool.push({kind:'ally',id:'support'});
+ if(s.archetype==='visionario'){const p=s.pending.find(p=>p.kind==='project');if(p&&!rushBlocked(s,p.id))pool.push({kind:'rush',id:p.id});}
+ return pool;
+}
+export function rollOptions(s){
+ if(s.status!=='playing'||s.actions>=3){s.options=[];return;}
+ const pool=draftPool(s),picks=[];
+ while(picks.length<3&&pool.length){const idx=Math.floor(random(s)*pool.length);picks.push(pool.splice(idx,1)[0]);}
+ while(picks.length<3)picks.push({kind:'pass',id:'pass'});
+ s.options=picks;
+}
+export function optionInfo(s,choice){
+ if(choice.kind==='operation'){
+  const o=operations.find(x=>x.id===choice.id);
+  const effect=previewEffect(s,o);
+  for(const k of Object.keys(effect)){const m=jokerMultiplier(s,k,o.category);if(m!==1)effect[k]=+(effect[k]*m).toFixed(2);}
+  return {kind:'operation',id:o.id,name:o.name,category:o.category,desc:o.desc,cost:effectiveCost(s,o),effect,blocked:blocked(s,o)};
+ }
+ if(choice.kind==='joker'){
+  const j=jokerDefs.find(x=>x.id===choice.id);
+  return {kind:'joker',id:j.id,name:j.name,icon:j.icon,category:'carta',desc:j.desc,cost:0,effect:j.onPick||{},blocked:s.status!=='playing'?'Partida encerrada':ownedJoker(s,j.id)?'Já possui esta carta':s.jokers.length>=maxJokers?'Limite de cartas atingido':''};
+ }
+ if(choice.kind==='asset'){
+  const r=s.regions[s.territory],o=r.asset&&assetOptions[r.asset.type].find(x=>x.id===choice.id);
+  if(!o)return {kind:'asset',id:choice.id,name:'Decisão indisponível',category:'negocio',desc:'O negócio não está mais disponível para esta decisão.',cost:0,effect:{},blocked:'Opção indisponível'};
+  return {kind:'asset',id:o.id,name:o.name,category:'negocio',desc:o.desc,cost:o.cost,effect:{},blocked:assetBlocked(s,s.territory,o.id)};
+ }
+ if(choice.kind==='ally'){
+  return {kind:'ally',id:'support',name:'Renovar compromisso com aliado',category:'alianca',desc:`Gaste $1B e recupere 30 de lealdade em ${s.regions[s.territory].name}.`,cost:1,effect:{},blocked:allyBlocked(s,s.territory)};
+ }
+ if(choice.kind==='rush'){
+  return {kind:'rush',id:choice.id,name:'Antecipar lançamento',category:'projeto',desc:'O projeto chega no próximo trimestre com +24 tecnologia e +12 caos. 25% de risco de falha: apenas +8 tecnologia e +10 exposição adicional.',cost:1,effect:{},blocked:rushBlocked(s,choice.id)};
+ }
+ return {kind:'pass',id:'pass',name:'Manter posição',category:'pass',desc:'Nenhuma opção vantajosa este mês. O grupo aguarda sem custo nem ganho.',cost:0,effect:{},blocked:s.status!=='playing'?'Partida encerrada':''};
+}
+export function optionBlocked(s,idx){const choice=s.options[idx];return choice?optionInfo(s,choice).blocked:'Opção indisponível';}
+export function chooseOption(s,idx){
+ const choice=s.options[idx];if(!choice||optionBlocked(s,idx))return false;
+ let ok=false;
+ if(choice.kind==='operation')ok=execute(s,choice.id);
+ else if(choice.kind==='joker')ok=acquireJoker(s,choice.id);
+ else if(choice.kind==='asset')ok=useAsset(s,s.territory,choice.id);
+ else if(choice.kind==='ally')ok=supportAlly(s,s.territory);
+ else if(choice.kind==='rush')ok=rushProject(s,choice.id);
+ else ok=passMonth(s);
+ if(!ok)return false;
+ if(s.status!=='playing')s.options=[];
+ else if(s.actions>=3){if(!endTurn(s))s.options=[];}
+ else rollOptions(s);
+ return true;
 }
 export const assetOptions = {
  energy:[{id:'extract',name:'Extrair dividendos',cost:0,desc:'+$2B agora; +6 exposição. Helena investiga a empresa.'},{id:'disrupt',name:'Provocar crise energética',cost:1,desc:'+18 caos e +7 exposição; interrompe a receita por 2 trimestres. O Pacto pode retirar a concessão.'}],
@@ -287,6 +378,7 @@ export function endTurn(s){
  if(s.world.alert>=25)s.world.investigation+=.5+s.world.alert*.01;
  s.world.alert=Math.max(0,s.world.alert-1);
  revealSecrets(s);outcome(s);offerDilemma(s);
+ if(s.status==='playing'&&!s.dilemma)rollOptions(s);else s.options=[];
  s.report={turn:s.turn,before,after:{money:s.money,chaos:s.chaos,exposure:s.exposure,investigation:s.world.investigation},entries:s.history.filter(h=>h.turn===s.turn),phase:phase(s),brief:turnBrief(s)};return true;
 }
 
@@ -314,7 +406,9 @@ export function dilemmaOptions(s){const d=s.dilemma;if(!d)return [];if(d.regiona
  ];}
 export function resolveDilemma(s,id,choice){
  const d=s.dilemma,o=dilemmaOptions(s).find(o=>o.id===choice);if(s.status!=='playing'||!d||d.id!==id||!o||dilemmaBlocked(s,choice))return false;
- s.money-=o.cost;apply(s,o.effect,s.territory);log(s,d.title,`${o.name}: −$${o.cost}B. ${describe(o.effect)}. Decisão sobre o dilema do T${d.turn}.`);recordDecision(s,d.title,o.name+'. '+describe(o.effect),o.effect);s.dilemma=null;outcome(s);return true;
+ s.money-=o.cost;apply(s,o.effect,s.territory);log(s,d.title,`${o.name}: −$${o.cost}B. ${describe(o.effect)}. Decisão sobre o dilema do T${d.turn}.`);recordDecision(s,d.title,o.name+'. '+describe(o.effect),o.effect);s.dilemma=null;outcome(s);
+ if(s.status==='playing'){if(s.actions>=3)endTurn(s);else if(!s.options.length)rollOptions(s);}
+ return true;
 }
 export function recoveryAvailable(s){return s.status==='playing'&&!s.recoveryUsed&&(s.money<=4||s.exposure>=75||s.world.investigation>=75);}
 export function recoveryOptions(s){return [
